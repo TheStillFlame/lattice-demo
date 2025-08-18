@@ -1,0 +1,129 @@
+name: Bootstrap research lab
+on: workflow_dispatch
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: detect
+        run: |
+          if [ -d src ] || [ -d data ]; then echo "done=true" >> $GITHUB_OUTPUT; else echo "done=false" >> $GITHUB_OUTPUT; fi
+
+      - name: Create scaffold (data/src/CI)
+        if: steps.detect.outputs.done == 'false'
+        run: |
+          set -e
+          mkdir -p data/raw data/processed notebooks src models reports .github/workflows
+          touch data/raw/.gitkeep data/processed/.gitkeep notebooks/.gitkeep models/.gitkeep reports/.gitkeep
+
+          cat > requirements.txt <<'PY'
+pandas
+numpy
+matplotlib
+PY
+
+          cat > src/build_corpus.py <<'PY'
+# Build a tiny corpus from data/raw/*.txt -> data/processed/corpus.csv
+import pathlib, csv
+out = pathlib.Path("data/processed"); out.mkdir(parents=True, exist_ok=True)
+rows=[]
+for p in sorted(pathlib.Path("data/raw").glob("*.txt")):
+    text=p.read_text(encoding="utf-8").strip()
+    if not text: continue
+    for line in text.splitlines():
+        line=line.strip()
+        if line: rows.append({"file":p.name,"line":line})
+with open(out/"corpus.csv","w",newline="",encoding="utf-8") as f:
+    w=csv.DictWriter(f,fieldnames=["file","line"]); w.writeheader(); w.writerows(rows)
+print(f"Wrote {len(rows)} rows to data/processed/corpus.csv")
+PY
+
+          cat > src/analyze.py <<'PY'
+# Simple frequency “HUD”
+import collections, pathlib, pandas as pd
+p=pathlib.Path("data/processed/corpus.csv")
+if not p.exists():
+    print("No corpus yet."); raise SystemExit(0)
+df=pd.read_csv(p)
+tokens=[tok for s in df["line"].astype(str) for tok in s.split()]
+ctr=collections.Counter(tokens)
+out=pathlib.Path("reports"); out.mkdir(parents=True, exist_ok=True)
+(out/"sign_freq.tsv").write_text("\n".join(f"{k}\t{v}" for k,v in ctr.most_common()), encoding="utf-8")
+print("Top 10:", ctr.most_common(10))
+PY
+
+          cat > .github/workflows/analysis.yml <<'YML'
+name: analysis
+on: [pull_request]
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: python -m pip install -r requirements.txt
+      - run: python src/build_corpus.py
+      - run: python src/analyze.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            reports/**
+            data/processed/corpus.csv
+YML
+
+          cat > .github/pull_request_template.md <<'MD'
+<!-- presence PR template -->
+## Context
+`<branch>@<short-sha> [UTC timestamp] — <one-line intent>`
+
+## Invariants (non-negotiables)
+- safety
+- truth
+- consent
+- time ≤ 10m
+- reversible (proved)
+- data integrity (no prod writes)
+
+## Plan — smallest reversible Δ
+1. …
+2. …
+
+## Undo / Revert
+- Command(s): …
+- Stop condition (get approval): …
+
+## Evidence / HUD
+- **preflight**: …
+- **guard**: …
+- **context string**: …
+- Links to run/logs: …
+
+## Checklist
+- [ ] CONTEXT_MSG present & printed
+- [ ] INVARIANTS stated (or linked)
+- [ ] REVERSIBLE proved (flag or plan)
+- [ ] Clean working tree; in sync with upstream
+- [ ] HEAD signature policy satisfied (mode: GU | G | ANY)
+- [ ] Dry-run preview completed
+- [ ] Ready for live run
+MD
+
+      - name: Open a PR with the scaffold
+        if: steps.detect.outputs.done == 'false'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: bootstrap/${{ github.run_id }}
+          commit-message: "chore: bootstrap research scaffold"
+          title: "Bootstrap scaffold (data/src/CI)"
+          body: "Adds folders, minimal scripts, and CI. Reversible by deleting added files."
+          labels: enhancement
+
+      - name: Already bootstrapped
+        if: steps.detect.outputs.done == 'true'
+        run: echo "Repo already has src/ or data — skipping."
